@@ -5,10 +5,11 @@ ARTIQ controller to interface with a BME high-voltage power supply and log its
 status data to InfluxDB.
 """
 
+from asyncio import sleep
 from artiq.tools import atexit_register_coroutine
 from llama.influxdb import aggregate_stats_default
 from llama.rpc import add_chunker_methods, run_simple_rpc_server
-from llama.sample_chunker import SampleChunker
+from llama.channels import ChunkedChannel
 from .driver import I2CInterface, StateType
 from .poller import Poller
 
@@ -19,6 +20,8 @@ def setup_args(parser):
     parser.add_argument("--i2c-dev-addr", default=None, type=int, required=True,
                         help="7-bit address of the power supply on the I2C bus "
                              "(cf. i2cdetect)")
+    parser.add_argument("--voltage-factor", default=None, type=float, required=True,
+                        help="highest voltage output by the particular hw model, in volts")
 
 
 def setup_interface(args, influx_pusher, loop):
@@ -30,7 +33,7 @@ def setup_interface(args, influx_pusher, loop):
         def bin_finished(values):
             if influx_pusher:
                 influx_pusher.push(name, aggregate_stats_default(values))
-        channels[ty] = SampleChunker(name, bin_finished, 256, 30, loop)
+        channels[ty] = ChunkedChannel(name, bin_finished, 256, 30, loop)
 
     # TODO: Better names once deduced what these actually are.
     add("imon_up", StateType.imon_up)
@@ -44,18 +47,69 @@ def setup_interface(args, influx_pusher, loop):
     add("ratio", StateType.ratio)
 
     callbacks = {}
-    for ty, chunker in channels.items():
-        callbacks[ty] = lambda x, chunker=chunker: chunker.push(x)
+    for ty, chan in channels.items():
+        callbacks[ty] = lambda x, chan=chan: chan.push(x)
     poller = Poller(i2c, callbacks)
     atexit_register_coroutine(poller.stop)
 
-    # Cannot use object() because it has no __dict__.
     class Interface:
-        pass
+        def __init__(self):
+            # It seems like we can't easily figure out whether the high-voltage
+            # stage is currently enabled, as the hardware only sends the
+            # status flag field when it changes. Thus, we have to do the wait
+            # the first time after startup (signified by None).
+            self._set_point_volts = None
+
+        async def set_voltage(self, set_point_volts):
+            """
+            Set the output voltage, in volts.
+
+            Even with the set point at zero, the hardware will output a small
+            residual voltage (likely an artifact of imperfect calibration
+            between the two bipolar stages used by the power supply). To
+            completely extinguish the signal, as well as for safety reasons,
+            set point 0.0 will also completely disable the output stage.
+            """
+
+            if set_point_volts < 0.0:
+                raise ValueError("Output voltage cannot be negative")
+            if set_point_volts > args.voltage_factor:
+                raise ValueError("Output voltage cannot exceed {} V".format(
+                    args.voltage_factor))
+
+            first = self._set_point_volts is None
+            if set_point_volts > 0.0 and (first or self._set_point_volts == 0.0):
+                await poller.enable_hv(True)
+
+                # The hardware implements some sort of soft-start mechanism,
+                # only enabling the output after about one second.
+                await sleep(2.0)
+
+            await poller.set_hv_set_point(set_point_volts / args.voltage_factor)
+
+            if set_point_volts == 0.0 and (first or self._set_point_volts > 0.0):
+                # Give the hardware some time to ramp down the voltage, as
+                # vaguely suggested by the manufacturer's recommended shutdown
+                # procedures (which assume that you control the power supply
+                # using the chunky 10-turn knob on the front panel).
+                await sleep(2.0)
+                await poller.enable_hv(False)
+
+            self._set_point_volts = set_point_volts
+
+        async def reset_fault(self):
+            """
+            Reset the hardware fault detection circuitry after a fault has
+            occurred (e.g. over-current/-temperature), allowing the output
+            to be enabled again.
+
+            Also disables the output (which, in case the hardware is actually
+            in a failure state, would have already occurred).
+            """
+            await self.set_voltage(0.0)
+            await poller.reset_fault()
+
     rpc_interface = Interface()
-    setattr(rpc_interface, "enable_hv", poller.enable_hv)
-    setattr(rpc_interface, "reset_fault", poller.reset_fault)
-    setattr(rpc_interface, "set_hv_set_point", poller.set_hv_set_point)
     for c in channels.values():
         add_chunker_methods(rpc_interface, c)
     return rpc_interface
