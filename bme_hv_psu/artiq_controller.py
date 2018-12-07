@@ -12,7 +12,9 @@ from llama.rpc import add_chunker_methods, run_simple_rpc_server
 from llama.channels import ChunkedChannel
 from .driver import I2CInterface, StateType
 from .poller import Poller
+import logging
 
+logger = logging.getLogger(__name__)
 
 def setup_args(parser):
     parser.add_argument("--i2c-bus-idx", default=None, type=int, required=True,
@@ -47,8 +49,9 @@ def setup_interface(args, influx_pusher, loop):
     add("ratio", StateType.ratio)
 
     callbacks = {}
-    for ty, chan in channels.items():
-        callbacks[ty] = lambda x, chan=chan: chan.push(x)
+    for ty, chunker in channels.items():
+        callbacks[ty] = lambda x, chunker=chunker: chunker.push(x)
+    callbacks[StateType.status_flags] = lambda x: logger.warn("Status flags changed: %s", x)
     poller = Poller(i2c, callbacks)
     atexit_register_coroutine(poller.stop)
 

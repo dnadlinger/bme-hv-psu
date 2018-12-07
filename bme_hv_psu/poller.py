@@ -96,7 +96,9 @@ class Poller:
 
             ty, val = await self._run_on_hardware(lambda i: i.read_state_update())
             if ty in self._callbacks_for_states:
-                self._callbacks_for_states[ty](val / (2**12 - 1))
+                if ty != driver.StateType.status_flags:
+                    val /= 2**12 - 1
+                self._callbacks_for_states[ty](val)
 
             elapsed = self._loop.time() - last_poll_time
             await sleep(max(0.0, self.polling_interval - elapsed))
