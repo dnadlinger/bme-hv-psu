@@ -13,6 +13,7 @@ from llama.channels import ChunkedChannel
 from .driver import I2CInterface, StateType
 from .poller import Poller
 import logging
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,9 @@ def setup_interface(args, influx_pusher, loop):
             between the two bipolar stages used by the power supply). To
             completely extinguish the signal, as well as for safety reasons,
             set point 0.0 will also completely disable the output stage.
+
+            :return: `False` if the setpoint is known to be the same as the
+                currently programmed one; `True` otherwise.
             """
 
             if set_point_volts < 0.0:
@@ -108,7 +112,10 @@ def setup_interface(args, influx_pusher, loop):
                 await sleep(2.0)
                 await poller.enable_hv(False)
 
+            previous_volts = self._set_point_volts
             self._set_point_volts = set_point_volts
+
+            return first or not math.isclose(previous_volts, set_point_volts)
 
         async def reset_fault(self):
             """
