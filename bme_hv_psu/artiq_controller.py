@@ -63,6 +63,16 @@ def setup_interface(args, influx_pusher, loop):
             # the first time after startup (signified by None).
             self._set_point_volts = None
 
+        async def get_voltage(self):
+            """
+            Return the last output voltage programmed.
+
+            This is the value as stored by the controller; there is no hardware
+            readback, so None is returned when the voltage has not been
+            programmed yet.
+            """
+            return self._set_point_volts
+
         async def set_voltage(self, set_point_volts):
             """
             Set the output voltage, in volts.
